@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>CM602 H3 補正工具</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,"Noto Sans TC",Arial,sans-serif;margin:0;background:#f4f7fb;color:#172033}
+    header{padding:20px 16px;background:#0f5ea8;color:white} h1{font-size:22px;margin:0 0 6px} p{line-height:1.5}
+    main{padding:16px;max-width:900px;margin:auto}.card{background:white;border-radius:16px;padding:16px;margin-bottom:14px;box-shadow:0 2px 12px #0001}
+    label{font-weight:700;display:block;margin:12px 0 6px}.hint{font-size:13px;color:#5b6475}.row{display:grid;gap:10px;grid-template-columns:1fr 1fr}
+    input,select,button{font-size:16px;border-radius:10px;border:1px solid #cbd5e1;padding:10px;width:100%;box-sizing:border-box}
+    button{background:#0f5ea8;color:#fff;border:0;font-weight:700;margin-top:12px}.secondary{background:#64748b}.danger{background:#b91c1c}
+    textarea{width:100%;height:170px;border-radius:10px;border:1px solid #cbd5e1;padding:10px;box-sizing:border-box;font-family:ui-monospace,monospace;font-size:13px}
+    table{width:100%;border-collapse:collapse;font-size:13px}td,th{border:1px solid #d8dee9;padding:6px;text-align:right}th{background:#eef4ff}.left{text-align:left}
+  </style>
+</head>
+<body>
+<header><h1>CM602 H3 吸頭補正工具</h1><div>iOS / Safari 可用，支援加入主畫面</div></header>
+<main>
+  <div class="card">
+    <b>使用流程</b>
+    <p class="hint">上傳 4 張照片：精度驗證數據、pos1、pos2、pos3。系統會辨識數值並填入 Excel：pos 資料到 5–12 列，精度驗證到 28–39 列。</p>
+  </div>
+  <div class="card">
+    <label>Excel 範本</label>
+    <input id="excelFile" type="file" accept=".xlsx" />
+    <p class="hint">不選也可使用內建 template.xlsx。</p>
+    <div class="row">
+      <div><label>工作表名稱</label><input id="sheetName" value="H3後側頭計算" /></div>
+      <div><label>吸頭位置</label><select id="head"><option>BR</option><option>AR</option><option>AF</option><option>BF</option></select></div>
+    </div>
+  </div>
+  <div class="card">
+    <label>上傳照片</label>
+    <input id="images" type="file" accept="image/*" multiple />
+    <button id="ocrBtn">開始辨識</button>
+    <p class="hint">第一次使用會載入 OCR 模組，需連網。辨識後請先核對下方數值，再輸出 Excel。</p>
+  </div>
+  <div class="card">
+    <label>辨識文字 / 可手動修正</label>
+    <textarea id="ocrText" placeholder="OCR 結果會顯示在這裡，也可貼上/修正文字。"></textarea>
+    <button class="secondary" id="parseBtn">重新解析數值</button>
+  </div>
+  <div class="card">
+    <b>解析結果</b>
+    <div id="result"></div>
+    <button id="exportBtn">產生補正 Excel</button>
+  </div>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
