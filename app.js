@@ -1,80 +1,266 @@
-let parsed = {pos: {}, validation: []};
-const angles = ["0","45","90","135","180","-135","-90","-45"];
+const photoInput = document.getElementById('photoInput');
+const countStatus = document.getElementById('countStatus');
+const previewGrid = document.getElementById('previewGrid');
+const startOcrBtn = document.getElementById('startOcrBtn');
+const ocrCard = document.getElementById('ocrCard');
+const resultCard = document.getElementById('resultCard');
+const progressBar = document.getElementById('progressBar');
+const progressText = document.getElementById('progressText');
+const integrityBox = document.getElementById('integrityBox');
+const resultList = document.getElementById('resultList');
+const rerunBtn = document.getElementById('rerunBtn');
+const downloadJsonBtn = document.getElementById('downloadJsonBtn');
 
-function nums(line){return (line.match(/-?\d+\.\d+|-?\d+/g)||[]).map(Number)}
-function normalize(t){return t.replace(/−/g,'-').replace(/—/g,'-').replace(/–/g,'-').replace(/[，]/g,'.')}
+let selectedFiles = [];
+let ocrResults = [];
 
-function parseText(){
-  const text = normalize(document.getElementById('ocrText').value);
-  const blocks = text.split(/(?=pos\s*[123]|精度|SEQ|吸頭位置偏移量)/i);
-  parsed = {pos:{}, validation:[]};
-  // Parse pos blocks: expect eight angle lines with X Y.
-  for(const b of blocks){
-    let p = (b.match(/pos\s*([123])/i)||[])[1];
-    if(!p) continue;
-    const rows=[];
-    b.split(/\n/).forEach(line=>{
-      const n=nums(line); if(n.length>=3){
-        const a=n[0]; if([0,45,90,135,180,-135,-90,-45].includes(a)) rows.push({angle:a,x:n[n.length-2],y:n[n.length-1]});
-      }
-    });
-    if(rows.length>=8) parsed.pos[p]=rows.slice(0,8);
-  }
-  // Fallback: if text from photos lacks explicit pos labels, take all 8-row XY angle tables in order as pos1,pos2,pos3.
-  if(Object.keys(parsed.pos).length<3){
-    const rows=[];
-    text.split(/\n/).forEach(line=>{const n=nums(line); if(n.length>=3){const a=n[0]; if([0,45,90,135,180,-135,-90,-45].includes(a)) rows.push({angle:a,x:n[n.length-2],y:n[n.length-1]});}});
-    for(let i=0;i<3;i++){ const part=rows.slice(i*8,(i+1)*8); if(part.length===8) parsed.pos[String(i+1)]=part; }
-  }
-  // Validation: lines with seq, nozzle number, mount coords, offset x/y/a. Keep last 12 rows with 8+ numeric values.
-  const v=[];
-  text.split(/\n/).forEach(line=>{const n=nums(line); if(n.length>=8){v.push({seq:n[0],nozzle:n[1],mx:n[2],my:n[3],ma:n[4],x:n[5],y:n[6],a:n[7]});}});
-  parsed.validation = v.slice(-12);
-  renderResult();
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('./service-worker.js').catch(() => {});
 }
 
-function renderResult(){
-  let html='';
-  for(const p of ['1','2','3']){
-    html += `<h3>pos${p}</h3><table><tr><th>角度</th><th>X</th><th>Y</th></tr>`;
-    (parsed.pos[p]||[]).forEach(r=>html += `<tr><td>${r.angle}</td><td>${r.x.toFixed(3)}</td><td>${r.y.toFixed(3)}</td></tr>`);
-    html += '</table>';
-  }
-  html += '<h3>精度驗證</h3><table><tr><th>SEQ</th><th>吸嘴</th><th>座標X</th><th>座標Y</th><th>A</th><th>偏移X</th><th>偏移Y</th><th>偏移A</th></tr>';
-  parsed.validation.forEach(r=>html += `<tr><td>${r.seq}</td><td>${r.nozzle}</td><td>${r.mx}</td><td>${r.my}</td><td>${r.ma}</td><td>${r.x}</td><td>${r.y}</td><td>${r.a}</td></tr>`);
-  html += '</table>';
-  document.getElementById('result').innerHTML=html;
+photoInput.addEventListener('change', () => {
+  selectedFiles = Array.from(photoInput.files || []);
+  renderPreviews();
+});
+
+startOcrBtn.addEventListener('click', runOcr);
+rerunBtn.addEventListener('click', () => {
+  selectedFiles = [];
+  ocrResults = [];
+  photoInput.value = '';
+  previewGrid.innerHTML = '';
+  resultCard.classList.add('hidden');
+  ocrCard.classList.add('hidden');
+  updateCountStatus();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+});
+
+downloadJsonBtn.addEventListener('click', () => {
+  syncEditedValues();
+  const blob = new Blob([JSON.stringify(ocrResults, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `cm602_h3_ocr_${formatTimestamp()}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+
+function renderPreviews() {
+  previewGrid.innerHTML = '';
+  selectedFiles.forEach((file, idx) => {
+    const url = URL.createObjectURL(file);
+    const div = document.createElement('div');
+    div.className = 'preview';
+    div.innerHTML = `<img src="${url}" alt="photo ${idx + 1}"><div>${idx + 1}. ${escapeHtml(file.name)}</div>`;
+    previewGrid.appendChild(div);
+  });
+  updateCountStatus();
 }
 
-async function readExcel(){
-  const f=document.getElementById('excelFile').files[0];
-  if(f) return await f.arrayBuffer();
-  return await (await fetch('template.xlsx')).arrayBuffer();
-}
-function cell(ws, addr, val){ if(!ws[addr]) ws[addr]={t:'n'}; ws[addr].v=val; ws[addr].t=typeof val==='number'?'n':'s'; }
-function exportXlsx(){
-  const wb=XLSX.read(new Uint8Array(window.excelBuf), {type:'array', cellStyles:true});
-  const name=document.getElementById('sheetName').value.trim();
-  const ws=wb.Sheets[name] || wb.Sheets[wb.SheetNames[0]];
-  // Default mapping: rows 5-12, columns B:C=pos1 X/Y, D:E=pos2 X/Y, F:G=pos3 X/Y.
-  const colMap={1:['B','C'],2:['D','E'],3:['F','G']};
-  for(const p of [1,2,3]) (parsed.pos[p]||[]).forEach((r,i)=>{cell(ws, colMap[p][0]+(5+i), r.x); cell(ws, colMap[p][1]+(5+i), r.y);});
-  // Validation rows 28-39, columns B:I = SEQ/nozzle/mountX/mountY/mountA/offX/offY/offA.
-  const cols=['B','C','D','E','F','G','H','I'];
-  parsed.validation.forEach((r,i)=>{[r.seq,r.nozzle,r.mx,r.my,r.ma,r.x,r.y,r.a].forEach((v,j)=>cell(ws, cols[j]+(28+i), v));});
-  XLSX.writeFile(wb, `CM602_H3_${document.getElementById('head').value}_補正.xlsx`);
+function updateCountStatus() {
+  const n = selectedFiles.length;
+  countStatus.className = 'status';
+  if (n === 0) {
+    countStatus.classList.add('muted');
+    countStatus.textContent = '尚未選取照片';
+    startOcrBtn.disabled = true;
+  } else if (n < 4) {
+    countStatus.classList.add('warn');
+    countStatus.textContent = `已選取 ${n} / 4 張，請補齊 4 張照片`;
+    startOcrBtn.disabled = true;
+  } else if (n > 4) {
+    countStatus.classList.add('err');
+    countStatus.textContent = `已選取 ${n} 張，一次只需 4 張照片`;
+    startOcrBtn.disabled = true;
+  } else {
+    countStatus.classList.add('ok');
+    countStatus.textContent = '已選取 4 / 4 張，可以開始 OCR 辨識';
+    startOcrBtn.disabled = false;
+  }
 }
 
-document.getElementById('ocrBtn').onclick=async()=>{
-  const files=[...document.getElementById('images').files];
-  let out='';
-  for(const f of files){
-    out += `\n\n--- ${f.name} ---\n`;
-    const r=await Tesseract.recognize(f,'eng',{logger:m=>{}});
-    out += r.data.text;
+async function runOcr() {
+  if (selectedFiles.length !== 4) return;
+  ocrCard.classList.remove('hidden');
+  resultCard.classList.add('hidden');
+  startOcrBtn.disabled = true;
+  ocrResults = [];
+  window.scrollTo({ top: ocrCard.offsetTop - 10, behavior: 'smooth' });
+
+  for (let i = 0; i < selectedFiles.length; i++) {
+    const file = selectedFiles[i];
+    progressText.textContent = `正在辨識第 ${i + 1} / 4 張：${file.name}`;
+    setProgress((i / selectedFiles.length) * 100);
+    try {
+      const image = await fileToDataURL(file);
+      const { data } = await Tesseract.recognize(image, 'eng+chi_tra', {
+        logger: m => {
+          if (m.status === 'recognizing text') {
+            const base = (i / selectedFiles.length) * 100;
+            const span = 100 / selectedFiles.length;
+            setProgress(base + (m.progress || 0) * span);
+          }
+        }
+      });
+      const text = data.text || '';
+      ocrResults.push({
+        fileName: file.name,
+        type: classifyImage(text, file.name),
+        values: extractValues(text),
+        rawText: text,
+        confidence: Math.round(data.confidence || 0)
+      });
+    } catch (error) {
+      ocrResults.push({
+        fileName: file.name,
+        type: '辨識失敗',
+        values: [],
+        rawText: String(error),
+        confidence: 0
+      });
+    }
   }
-  document.getElementById('ocrText').value=out; parseText();
-};
-document.getElementById('parseBtn').onclick=parseText;
-document.getElementById('exportBtn').onclick=async()=>{window.excelBuf=await readExcel(); exportXlsx();};
-if('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(()=>{});
+
+  setProgress(100);
+  progressText.textContent = 'OCR 完成，請確認結果。';
+  renderResults();
+  resultCard.classList.remove('hidden');
+  window.scrollTo({ top: resultCard.offsetTop - 10, behavior: 'smooth' });
+  startOcrBtn.disabled = false;
+}
+
+function classifyImage(text, fileName) {
+  const s = `${text}\n${fileName}`.toLowerCase();
+  if (/精度|verification|accuracy|cpk|校驗|驗證/.test(s)) return '精度驗證';
+  if (/pos\s*1|position\s*1|nozzle\s*1|吸頭.*1|位置.*1/.test(s)) return 'Pos1';
+  if (/pos\s*2|position\s*2|nozzle\s*2|吸頭.*2|位置.*2/.test(s)) return 'Pos2';
+  if (/pos\s*3|position\s*3|nozzle\s*3|吸頭.*3|位置.*3/.test(s)) return 'Pos3';
+  if (/offset|偏移|吸頭位置/.test(s)) return '吸頭位置偏移量';
+  return '未判斷';
+}
+
+function extractValues(text) {
+  const lines = text.split(/\n+/).map(line => line.trim()).filter(Boolean);
+  const rows = [];
+  const anglePattern = /(-?\d{1,3})\s*(?:°|度|deg)?/;
+  const decimalPattern = /[-+]?\d*\.\d+|[-+]?\d+/g;
+
+  for (const line of lines) {
+    const decimals = (line.match(decimalPattern) || [])
+      .map(v => Number(v))
+      .filter(v => Number.isFinite(v));
+
+    // Common screen rows contain angle + X + Y. Keep rows with at least 2 small decimal values.
+    const smallDecimals = decimals.filter(v => Math.abs(v) < 10 && !Number.isInteger(v));
+    if (smallDecimals.length >= 2) {
+      const angleMatch = line.match(anglePattern);
+      rows.push({
+        angle: angleMatch ? angleMatch[1] : '',
+        x: smallDecimals[0],
+        y: smallDecimals[1],
+        sourceLine: line
+      });
+    }
+  }
+
+  // Fallback: take decimal pairs from whole text.
+  if (rows.length === 0) {
+    const nums = (text.match(/[-+]?\d*\.\d+/g) || []).map(Number);
+    for (let i = 0; i + 1 < nums.length; i += 2) {
+      rows.push({ angle: '', x: nums[i], y: nums[i + 1], sourceLine: '自動配對' });
+    }
+  }
+
+  return rows.slice(0, 16);
+}
+
+function renderResults() {
+  renderIntegrity();
+  resultList.innerHTML = '';
+  ocrResults.forEach((r, idx) => {
+    const item = document.createElement('div');
+    item.className = 'resultItem';
+    const rowsHtml = r.values.length ? r.values.map((v, vi) => `
+      <div class="kvGrid" data-row="${vi}">
+        <div class="kv"><label>角度</label><input data-idx="${idx}" data-row="${vi}" data-key="angle" value="${escapeHtml(v.angle ?? '')}"></div>
+        <div class="kv"><label>X</label><input data-idx="${idx}" data-row="${vi}" data-key="x" value="${escapeHtml(v.x ?? '')}"></div>
+        <div class="kv"><label>Y</label><input data-idx="${idx}" data-row="${vi}" data-key="y" value="${escapeHtml(v.y ?? '')}"></div>
+        <div class="kv"><label>來源列</label><input value="${escapeHtml(v.sourceLine ?? '')}" readonly></div>
+      </div>`).join('') : '<div class="status warn">未抓到 X/Y 數值，請確認原始 OCR 文字。</div>';
+
+    item.innerHTML = `
+      <div class="resultHead">
+        <strong>${escapeHtml(r.fileName)}</strong>
+        <span class="typeTag">${escapeHtml(r.type)}</span>
+      </div>
+      <div class="status ${r.confidence >= 60 ? 'ok' : r.confidence >= 35 ? 'warn' : 'err'}">OCR 信心值：${r.confidence}%</div>
+      ${rowsHtml}
+      <details>
+        <summary>查看原始 OCR 文字</summary>
+        <textarea readonly>${escapeHtml(r.rawText)}</textarea>
+      </details>
+    `;
+    resultList.appendChild(item);
+  });
+}
+
+function renderIntegrity() {
+  integrityBox.innerHTML = '';
+  const expected = ['Pos1', 'Pos2', 'Pos3', '精度驗證'];
+  const counts = Object.create(null);
+  ocrResults.forEach(r => counts[r.type] = (counts[r.type] || 0) + 1);
+
+  addCheck(selectedFiles.length === 4, `照片張數：${selectedFiles.length} / 4`);
+  expected.forEach(type => addCheck(counts[type] === 1, `${type}：${counts[type] || 0} 張`));
+  const unknown = ocrResults.filter(r => r.type === '未判斷' || r.type === '辨識失敗' || r.type === '吸頭位置偏移量').length;
+  addCheck(unknown === 0, `未完成分類照片：${unknown} 張`);
+  const missingValues = ocrResults.filter(r => !r.values || r.values.length === 0).length;
+  addCheck(missingValues === 0, `無 X/Y 數值照片：${missingValues} 張`);
+}
+
+function addCheck(ok, text) {
+  const div = document.createElement('div');
+  div.className = `checkItem ${ok ? 'ok' : 'warn'}`;
+  div.textContent = `${ok ? '✓' : '⚠'} ${text}`;
+  integrityBox.appendChild(div);
+}
+
+function syncEditedValues() {
+  document.querySelectorAll('input[data-idx]').forEach(input => {
+    const idx = Number(input.dataset.idx);
+    const row = Number(input.dataset.row);
+    const key = input.dataset.key;
+    if (ocrResults[idx] && ocrResults[idx].values[row]) {
+      const val = input.value.trim();
+      ocrResults[idx].values[row][key] = key === 'angle' ? val : Number(val);
+    }
+  });
+}
+
+function fileToDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function setProgress(percent) {
+  progressBar.style.width = `${Math.max(0, Math.min(100, percent))}%`;
+}
+
+function formatTimestamp() {
+  const d = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
+}
