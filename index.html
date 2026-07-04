@@ -13,9 +13,9 @@
 <body>
   <main class="app">
     <header class="hero">
-      <div class="badge">V1.0 · 第二階段</div>
+      <div class="badge">V1.0 · 第三階段</div>
       <h1>CM602 H3 吸頭補正工具</h1>
-      <p>上傳 4 張照片，系統先進行 OCR 辨識與完整性檢查。Excel 輸出會在下一階段接上。</p>
+      <p>固定版面 OCR 強化版：先裁切螢幕與表格區域，再辨識 Pos1 / Pos2 / Pos3 / 精度驗證。</p>
     </header>
 
     <section class="card" id="uploadCard">
@@ -35,13 +35,18 @@
       <h2>2. OCR 辨識中</h2>
       <div class="progressWrap"><div id="progressBar" class="progressBar"></div></div>
       <p id="progressText" class="hint">準備中…</p>
+      <p class="hint small">此版會先裁切表格區域，所以速度會比第二階段稍慢，但分類會更穩。</p>
     </section>
 
     <section class="card hidden" id="resultCard">
       <h2>3. 辨識結果確認</h2>
       <div id="integrityBox" class="integrityBox"></div>
-      <p class="hint">下方數值可手動修改。此階段先確認 OCR 是否能抓到資料，下一階段會接 Excel 自動寫入。</p>
+      <p class="hint">下方數值可手動修改。此階段先確認 OCR 與分類，下一階段會接 Excel 自動寫入。</p>
       <div id="resultList" class="resultList"></div>
+      <details class="debugBox">
+        <summary>查看裁切區域 / OCR 原始文字</summary>
+        <div id="debugList"></div>
+      </details>
       <div class="actions">
         <button id="rerunBtn" class="secondary">重新選擇照片</button>
         <button id="downloadJsonBtn" class="primary">下載辨識結果 JSON</button>
@@ -49,11 +54,11 @@
     </section>
 
     <footer>
-      <span>CM602 H3 專用 · Pos1~Pos3 / 精度驗證</span>
+      <span>CM602 H3 專用 · 固定版面裁切 OCR</span>
     </footer>
   </main>
 
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-  <script src="app.js"></script>
+  <script src="app.js?v=3"></script>
 </body>
 </html>
