@@ -119,35 +119,55 @@ function buildRois(img, screen, typeGuess){
 }
 
 function detectPosSelection(img, screen){
-  // 第四階段：改用綠色選取按鈕的重心判斷，不用固定三格分數，避免 Pos2 被誤判成 Pos1。
+  // 第五階段：改用三個固定按鈕區域的「青綠色分數」判斷。
+  // 不再用整個 ROI 的重心，避免 Pos1/Pos3 因拍照角度或裁切偏移被誤判成 Pos2。
   const r = clampRect(rel(screen,.33,.30,.32,.15), img);
   const c=document.createElement('canvas'); c.width=Math.round(r.w); c.height=Math.round(r.h);
   const ctx=c.getContext('2d'); ctx.drawImage(img,r.x,r.y,r.w,r.h,0,0,c.width,c.height);
   const im=ctx.getImageData(0,0,c.width,c.height);
-  let sumX=0, count=0;
-  for(let y=0;y<c.height;y++){
-    for(let x=0;x<c.width;x++){
-      const i=(y*c.width+x)*4; const R=im.data[i],G=im.data[i+1],B=im.data[i+2];
-      // CM602 選取狀態為青綠色：G/B 偏高、R 偏低。放寬條件以適應手機拍照亮度。
-      if(G>100 && B>75 && R<155 && G>R*1.08 && B>R*0.85){ sumX += x; count++; }
-    }
-  }
-  if(count < c.width*c.height*0.008) return null;
-  const cx = sumX / count / c.width;
-  if(cx < 0.36) return 1;
-  if(cx < 0.66) return 2;
-  return 3;
+
+  // 依實機畫面，三顆 pos 按鈕約佔 ROI 的左/中/右三段；每段只看中間按鈕本體，避開文字與邊框。
+  const boxes=[
+    {x0:0.03,x1:0.31,y0:0.12,y1:0.78},
+    {x0:0.35,x1:0.64,y0:0.12,y1:0.78},
+    {x0:0.68,x1:0.97,y0:0.12,y1:0.78}
+  ];
+  const scores=boxes.map(b=>greenScore(im,c.width,c.height,b));
+  const max=Math.max(...scores); const idx=scores.indexOf(max);
+  const second=[...scores].sort((a,b)=>b-a)[1] || 0;
+
+  // 精度驗證畫面在這個 ROI 不是 pos 按鈕，會有零散色塊；提高門檻避免誤判。
+  // 選取的青綠色按鈕通常分數明顯高於其他兩格。
+  if(max < 0.030) return null;
+  if(max < second * 1.45 && max < 0.085) return null;
+  return idx+1;
 }
 
+function greenScore(im,w,h,b){
+  const x0=Math.floor(w*b.x0), x1=Math.floor(w*b.x1), y0=Math.floor(h*b.y0), y1=Math.floor(h*b.y1);
+  let score=0, total=0;
+  for(let y=y0;y<y1;y++){
+    for(let x=x0;x<x1;x++){
+      const i=(y*w+x)*4; const R=im.data[i],G=im.data[i+1],B=im.data[i+2];
+      total++;
+      // CM602 選取色：青綠色，G/B 高、R 低；用連續分數而非硬切，提升不同光線下的穩定度。
+      const cyan = Math.max(0, Math.min(G,B)-R-18) / 180;
+      const bright = Math.max(0, Math.min(G,B)-75) / 180;
+      if(G>90 && B>75 && R<175 && cyan>0) score += Math.min(1, cyan) * Math.min(1, bright);
+    }
+  }
+  return total ? score/total : 0;
+}
 async function ocrCanvas(worker, canvas){
   const res = await worker.recognize(canvas);
   return { text: res.data.text || '', confidence: Math.round(res.data.confidence || 0) };
 }
 function decideType(text,posSel){
   const t=(text||'').replace(/\s/g,'');
-  if(t.includes('精') || t.includes('驗') || t.toLowerCase().includes('seq')) return 'precision';
+  const low=t.toLowerCase();
+  if(t.includes('精') || t.includes('驗') || low.includes('seq')) return 'precision';
+  if(t.includes('各') || t.includes('角') || t.includes('吸') || low.includes('pos')) return 'position';
   if(posSel) return 'position';
-  if(t.includes('各') || t.includes('角') || t.includes('吸')) return 'position';
   return 'precision';
 }
 function guessPosFromText(text){
