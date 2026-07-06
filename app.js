@@ -28,10 +28,7 @@ function renderPreview(){
 async function runOcr(){
   results=[]; els.upload.classList.add('hidden'); els.ocr.classList.remove('hidden'); setProgress(2,'載入 OCR 引擎…');
   const worker = await Tesseract.createWorker('eng');
-  await worker.setParameters({
-    tessedit_pageseg_mode: '6',
-    tessedit_char_whitelist: '0123456789.-° posPOS精度驗證數據各角度吸頭位置XxYy[]mm偏移量實裝座標SEQ吸嘴編號 '
-  });
+  await setOcrMode(worker, 'general');
   for(let i=0;i<files.length;i++){
     setProgress(5 + i*23, `處理第 ${i+1} / ${files.length} 張：讀取圖片與裁切螢幕…`);
     const image = await loadImage(files[i]);
@@ -49,14 +46,16 @@ async function runOcr(){
     let parsed = { rows: [], values: [] };
     let tableOcr, posOcr = {text:'', confidence:0};
     if(type === 'precision'){
-      setProgress(15 + i*23, `第 ${i+1} 張：辨識精度驗證表格…`);
+      setProgress(15 + i*23, `第 ${i+1} 張：逐格辨識精度驗證 X/Y…`);
       tableOcr = await ocrCanvas(worker, rois.precisionTable);
-      parsed = parsePrecisionRows(tableOcr.text);
+      parsed = await parsePrecisionByCells(worker, rois.precisionTableRaw);
+      if((parsed.rows||[]).length < 8) parsed = parsePrecisionRows(tableOcr.text);
     } else {
-      setProgress(15 + i*23, `第 ${i+1} 張：辨識吸頭位置表格…`);
+      setProgress(15 + i*23, `第 ${i+1} 張：逐格辨識吸頭位置 X/Y…`);
       posOcr = await ocrCanvas(worker, rois.posButtons);
       tableOcr = await ocrCanvas(worker, rois.positionTable);
-      parsed = parsePositionRows(tableOcr.text);
+      parsed = await parsePositionByCells(worker, rois.positionTableRaw);
+      if((parsed.rows||[]).filter(r=>isFinite(r.x)&&isFinite(r.y)).length < 6) parsed = parsePositionRows(tableOcr.text);
     }
 
     const name = type === 'precision' ? '精度驗證' : (posSel ? `Pos${posSel}` : guessPosFromText(posOcr.text));
@@ -117,8 +116,10 @@ function buildRois(img, screen, typeGuess){
     // Pos 按鈕區加寬、往左移，避免 Pos2 的青綠色落在左格造成誤判。
     posButtons: cropCanvas(img, rel(screen, .28,.285,.40,.17), 4, false),
     positionTable: cropCanvas(img, rel(screen, .035,.500,.285,.340), 4, true),
+    positionTableRaw: cropCanvas(img, rel(screen, .035,.500,.285,.340), 5, false),
     // 精度驗證只裁偏移量 X/Y/A 欄，不再讀整張大表，避免 OCR 抓到實裝座標。
-    precisionTable: cropCanvas(img, rel(screen, .40,.18,.35,.43), 4, true)
+    precisionTable: cropCanvas(img, rel(screen, .40,.18,.35,.43), 4, true),
+    precisionTableRaw: cropCanvas(img, rel(screen, .40,.18,.35,.43), 5, false)
   };
 }
 
@@ -163,9 +164,84 @@ function greenScore(im,w,h,b){
   return total ? score/total : 0;
 }
 async function ocrCanvas(worker, canvas){
+  await setOcrMode(worker, 'general');
   const res = await worker.recognize(canvas);
   return { text: res.data.text || '', confidence: Math.round(res.data.confidence || 0) };
 }
+
+async function setOcrMode(worker, mode){
+  if(mode === 'number'){
+    await worker.setParameters({
+      tessedit_pageseg_mode: '7',
+      tessedit_char_whitelist: '0123456789.-'
+    });
+  } else {
+    await worker.setParameters({
+      tessedit_pageseg_mode: '6',
+      tessedit_char_whitelist: '0123456789.-° posPOS精度驗證數據各角度吸頭位置XxYy[]mm偏移量實裝座標SEQ吸嘴編號 '
+    });
+  }
+}
+function cropFromCanvas(src, rx, ry, rw, rh, scale=3, binary=true){
+  const sx=Math.max(0,Math.round(src.width*rx));
+  const sy=Math.max(0,Math.round(src.height*ry));
+  const sw=Math.max(1,Math.round(src.width*rw));
+  const sh=Math.max(1,Math.round(src.height*rh));
+  const out=document.createElement('canvas'); out.width=Math.round(sw*scale); out.height=Math.round(sh*scale);
+  const ctx=out.getContext('2d'); ctx.imageSmoothingEnabled=true;
+  ctx.drawImage(src,sx,sy,sw,sh,0,0,out.width,out.height);
+  if(binary){
+    const im=ctx.getImageData(0,0,out.width,out.height); const d=im.data;
+    for(let i=0;i<d.length;i+=4){
+      let g=0.299*d[i]+0.587*d[i+1]+0.114*d[i+2];
+      g = Math.max(0, Math.min(255, (g-118)*1.35+128));
+      // 保留灰階反白字，不使用過強黑白化；數字邊緣比較不會整片糊掉。
+      const v = g>142 ? 255 : 0; d[i]=d[i+1]=d[i+2]=v;
+    }
+    ctx.putImageData(im,0,0);
+  }
+  out.dataUrl=out.toDataURL('image/jpeg',0.9); return out;
+}
+async function ocrNumber(worker, canvas){
+  await setOcrMode(worker, 'number');
+  const res = await worker.recognize(canvas);
+  const text = normalizeText(res.data.text || '');
+  const m = text.match(/-?\d+\.\d{2,3}/);
+  if(!m) return {value:NaN, text, confidence:Math.round(res.data.confidence||0)};
+  return {value:round3(Number(m[0])), text, confidence:Math.round(res.data.confidence||0)};
+}
+async function parsePositionByCells(worker, rawCanvas){
+  const angleOrder=[0,45,90,135,180,-135,-90,-45];
+  const rows=[];
+  // 表格裁切已固定：左側是角度，右側兩欄是 X/Y。這裡不讀角度文字，直接照固定 8 列順序。
+  const top=0.105, bottom=0.965, rowH=(bottom-top)/8;
+  for(let i=0;i<8;i++){
+    const y=top+i*rowH;
+    const xCell=cropFromCanvas(rawCanvas, 0.36, y, 0.285, rowH*0.92, 4, true);
+    const yCell=cropFromCanvas(rawCanvas, 0.64, y, 0.31, rowH*0.92, 4, true);
+    const xo=await ocrNumber(worker, xCell);
+    const yo=await ocrNumber(worker, yCell);
+    rows.push({angle:angleOrder[i], x:xo.value, y:yo.value, source:`cell ${i+1}: X=${xo.text.trim()} Y=${yo.text.trim()}`});
+  }
+  await setOcrMode(worker, 'general');
+  return {rows, values:rows};
+}
+async function parsePrecisionByCells(worker, rawCanvas){
+  const rows=[];
+  // 精度驗證裁切為偏移量區，左到右大約是 X/Y/A，固定 12 列。
+  const top=0.205, bottom=0.965, rowH=(bottom-top)/12;
+  for(let i=0;i<12;i++){
+    const y=top+i*rowH;
+    const xCell=cropFromCanvas(rawCanvas, 0.04, y, 0.34, rowH*0.92, 4, true);
+    const yCell=cropFromCanvas(rawCanvas, 0.38, y, 0.30, rowH*0.92, 4, true);
+    const xo=await ocrNumber(worker, xCell);
+    const yo=await ocrNumber(worker, yCell);
+    rows.push({seq:i+1, nozzle:(i%3)+1, x:xo.value, y:yo.value, source:`cell ${i+1}: X=${xo.text.trim()} Y=${yo.text.trim()}`});
+  }
+  await setOcrMode(worker, 'general');
+  return {rows, values:rows};
+}
+
 function decideType(text,posSel){
   const t=(text||'').replace(/\s/g,'');
   const low=t.toLowerCase();
