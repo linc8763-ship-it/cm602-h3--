@@ -49,13 +49,11 @@ async function runOcr(){
       setProgress(15 + i*23, `第 ${i+1} 張：逐格辨識精度驗證 X/Y…`);
       tableOcr = await ocrCanvas(worker, rois.precisionTable);
       parsed = await parsePrecisionByCells(worker, rois.precisionTableRaw);
-      if((parsed.rows||[]).length < 8) parsed = parsePrecisionRows(tableOcr.text);
     } else {
       setProgress(15 + i*23, `第 ${i+1} 張：逐格辨識吸頭位置 X/Y…`);
       posOcr = await ocrCanvas(worker, rois.posButtons);
       tableOcr = await ocrCanvas(worker, rois.positionTable);
       parsed = await parsePositionByCells(worker, rois.positionTableRaw);
-      if((parsed.rows||[]).filter(r=>isFinite(r.x)&&isFinite(r.y)).length < 6) parsed = parsePositionRows(tableOcr.text);
     }
 
     const name = type === 'precision' ? '精度驗證' : (posSel ? `Pos${posSel}` : guessPosFromText(posOcr.text));
@@ -202,13 +200,39 @@ function cropFromCanvas(src, rx, ry, rw, rh, scale=3, binary=true){
   }
   out.dataUrl=out.toDataURL('image/jpeg',0.9); return out;
 }
-async function ocrNumber(worker, canvas){
+async function ocrNumber(worker, canvas, kind='raw'){
   await setOcrMode(worker, 'number');
   const res = await worker.recognize(canvas);
   const text = normalizeText(res.data.text || '');
-  const m = text.match(/-?\d+\.\d{2,3}/);
-  if(!m) return {value:NaN, text, confidence:Math.round(res.data.confidence||0)};
-  return {value:round3(Number(m[0])), text, confidence:Math.round(res.data.confidence||0)};
+  const conf = Math.round(res.data.confidence||0);
+  const matches = text.match(/-?\d+\.\d{2,3}/g) || [];
+  let value = NaN;
+  if(matches.length){
+    // 單格內有時會讀到雜訊，選最像偏移量的小數。
+    const candidates = matches.map(Number).filter(v=>Math.abs(v) < 0.5);
+    if(candidates.length) value = candidates[0];
+  }
+  if(Number.isFinite(value)){
+    if(kind === 'posX'){
+      // CM602 H3 目前這類補正畫面的 X 欄常為負值；Tesseract 很容易漏掉負號。
+      // 只在合理範圍內自動補負號，避免把 Y 欄誤塞進 X。
+      if(value > 0.03 && value < 0.30) value = -Math.abs(value);
+      if(Math.abs(value) > 0.35) value = NaN;
+    }
+    if(kind === 'posY'){
+      if(value < 0 && Math.abs(value) < 0.35) value = Math.abs(value);
+      if(value < 0 || value > 0.45) value = NaN;
+    }
+    if(kind === 'precisionX'){
+      if(Math.abs(value) > 0.10) value = NaN;
+    }
+    if(kind === 'precisionY'){
+      if(Math.abs(value) > 0.10) value = NaN;
+    }
+  }
+  // 信心太低但仍有值時保留，讓使用者可確認；完全無法辨識則空白。
+  if(!Number.isFinite(value)) return {value:'', text, confidence:conf};
+  return {value:round3(value), text, confidence:conf};
 }
 async function parsePositionByCells(worker, rawCanvas){
   const angleOrder=[0,45,90,135,180,-135,-90,-45];
@@ -217,10 +241,10 @@ async function parsePositionByCells(worker, rawCanvas){
   const top=0.105, bottom=0.965, rowH=(bottom-top)/8;
   for(let i=0;i<8;i++){
     const y=top+i*rowH;
-    const xCell=cropFromCanvas(rawCanvas, 0.36, y, 0.285, rowH*0.92, 4, true);
-    const yCell=cropFromCanvas(rawCanvas, 0.64, y, 0.31, rowH*0.92, 4, true);
-    const xo=await ocrNumber(worker, xCell);
-    const yo=await ocrNumber(worker, yCell);
+    const xCell=cropFromCanvas(rawCanvas, 0.30, y, 0.34, rowH*0.92, 5, true);
+    const yCell=cropFromCanvas(rawCanvas, 0.62, y, 0.33, rowH*0.92, 5, true);
+    const xo=await ocrNumber(worker, xCell, 'posX');
+    const yo=await ocrNumber(worker, yCell, 'posY');
     rows.push({angle:angleOrder[i], x:xo.value, y:yo.value, source:`cell ${i+1}: X=${xo.text.trim()} Y=${yo.text.trim()}`});
   }
   await setOcrMode(worker, 'general');
@@ -234,8 +258,8 @@ async function parsePrecisionByCells(worker, rawCanvas){
     const y=top+i*rowH;
     const xCell=cropFromCanvas(rawCanvas, 0.04, y, 0.34, rowH*0.92, 4, true);
     const yCell=cropFromCanvas(rawCanvas, 0.38, y, 0.30, rowH*0.92, 4, true);
-    const xo=await ocrNumber(worker, xCell);
-    const yo=await ocrNumber(worker, yCell);
+    const xo=await ocrNumber(worker, xCell, 'precisionX');
+    const yo=await ocrNumber(worker, yCell, 'precisionY');
     rows.push({seq:i+1, nozzle:(i%3)+1, x:xo.value, y:yo.value, source:`cell ${i+1}: X=${xo.text.trim()} Y=${yo.text.trim()}`});
   }
   await setOcrMode(worker, 'general');
@@ -319,7 +343,7 @@ function renderIntegrity(){
   const pos3=results.filter(r=>r.name==='Pos3').length;
   const precision=results.filter(r=>r.type==='precision').length;
   const unclassified=results.filter(r=>r.name==='未判斷').length;
-  const noData=results.filter(r=>(r.parsed.rows||[]).length===0).length;
+  const noData=results.filter(r=>(r.parsed.rows||[]).filter(row=>row.x!==''&&row.y!=='').length===0).length;
   const items=[
     [results.length===4,`照片張數：${results.length} / 4`], [pos1===1,`Pos1：${pos1} 張`], [pos2===1,`Pos2：${pos2} 張`], [pos3===1,`Pos3：${pos3} 張`],
     [precision===1,`精度驗證：${precision} 張`], [unclassified===0,`未完成分類照片：${unclassified} 張`], [noData===0,`無 X/Y 數值照片：${noData} 張`]
@@ -343,11 +367,11 @@ function renderResultCards(){
 }
 function miniPositionTable(rows,idx){
   if(!rows.length) return '<div class="status warn">⚠ 未抓到吸頭位置 X/Y 表格，請看下方 OCR 原文。</div>';
-  return `<div class="rowData"><table class="miniTable"><thead><tr><th>角度</th><th>X</th><th>Y</th></tr></thead><tbody>${rows.map((r,i)=>`<tr><td>${r.angle}°</td><td><input value="${r.x}" onchange="results[${idx}].parsed.rows[${i}].x=Number(this.value)"></td><td><input value="${r.y}" onchange="results[${idx}].parsed.rows[${i}].y=Number(this.value)"></td></tr>`).join('')}</tbody></table></div>`;
+  return `<div class="rowData"><table class="miniTable"><thead><tr><th>角度</th><th>X</th><th>Y</th></tr></thead><tbody>${rows.map((r,i)=>`<tr><td>${r.angle}°</td><td><input value="${r.x}" onchange="results[${idx}].parsed.rows[${i}].x=this.value===''?'':Number(this.value)"></td><td><input value="${r.y}" onchange="results[${idx}].parsed.rows[${i}].y=this.value===''?'':Number(this.value)"></td></tr>`).join('')}</tbody></table></div>`;
 }
 function miniPrecisionTable(rows,idx){
   if(!rows.length) return '<div class="status warn">⚠ 未抓到精度驗證 X/Y 表格，請看下方 OCR 原文。</div>';
-  return `<div class="rowData"><table class="miniTable"><thead><tr><th>SEQ</th><th>吸嘴</th><th>X偏移</th><th>Y偏移</th></tr></thead><tbody>${rows.map((r,i)=>`<tr><td>${r.seq}</td><td>${r.nozzle}</td><td><input value="${r.x}" onchange="results[${idx}].parsed.rows[${i}].x=Number(this.value)"></td><td><input value="${r.y}" onchange="results[${idx}].parsed.rows[${i}].y=Number(this.value)"></td></tr>`).join('')}</tbody></table></div>`;
+  return `<div class="rowData"><table class="miniTable"><thead><tr><th>SEQ</th><th>吸嘴</th><th>X偏移</th><th>Y偏移</th></tr></thead><tbody>${rows.map((r,i)=>`<tr><td>${r.seq}</td><td>${r.nozzle}</td><td><input value="${r.x}" onchange="results[${idx}].parsed.rows[${i}].x=this.value===''?'':Number(this.value)"></td><td><input value="${r.y}" onchange="results[${idx}].parsed.rows[${i}].y=this.value===''?'':Number(this.value)"></td></tr>`).join('')}</tbody></table></div>`;
 }
 function renderDebug(){
   els.debugList.innerHTML=results.map(r=>`<div class="debugItem"><b>${escapeHtml(r.filename)} · ${r.name}</b><p>表格裁切</p><img src="${r.crops.table}"><p>Pos 裁切</p><img src="${r.crops.pos}"><p>標題 OCR</p><pre>${escapeHtml(r.ocr.title.text)}</pre><p>表格 OCR</p><pre>${escapeHtml(r.ocr.table.text)}</pre><p>Pos OCR</p><pre>${escapeHtml(r.ocr.pos.text)}</pre></div>`).join('');
