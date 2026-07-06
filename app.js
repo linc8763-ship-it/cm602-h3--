@@ -37,6 +37,8 @@ async function runOcr(){
     const image = await loadImage(files[i]);
     const screen = detectScreenRect(image);
     const posSel = detectPosSelection(image, screen);
+    // 第六階段：分類以影像判斷為主。只要抓到 Pos1/2/3 青綠色選取按鈕，就一定是吸頭位置畫面；
+    // 沒有抓到 Pos 按鈕時，預設為精度驗證，避免精度驗證表格被誤判成 Pos。
     const typeGuess = posSel ? 'position' : 'precision';
 
     const rois = buildRois(image, screen, typeGuess);
@@ -112,25 +114,27 @@ function cropCanvas(img, r, scale=3, binary=true){
 function buildRois(img, screen, typeGuess){
   return {
     title: cropCanvas(img, rel(screen, .13,.07,.54,.095), 3, true),
-    posButtons: cropCanvas(img, rel(screen, .33,.30,.32,.15), 4, false),
+    // Pos 按鈕區加寬、往左移，避免 Pos2 的青綠色落在左格造成誤判。
+    posButtons: cropCanvas(img, rel(screen, .28,.285,.40,.17), 4, false),
     positionTable: cropCanvas(img, rel(screen, .035,.500,.285,.340), 4, true),
-    precisionTable: cropCanvas(img, rel(screen, .06,.18,.64,.43), 3, true)
+    // 精度驗證只裁偏移量 X/Y/A 欄，不再讀整張大表，避免 OCR 抓到實裝座標。
+    precisionTable: cropCanvas(img, rel(screen, .40,.18,.35,.43), 4, true)
   };
 }
 
 function detectPosSelection(img, screen){
   // 第五階段：改用三個固定按鈕區域的「青綠色分數」判斷。
   // 不再用整個 ROI 的重心，避免 Pos1/Pos3 因拍照角度或裁切偏移被誤判成 Pos2。
-  const r = clampRect(rel(screen,.33,.30,.32,.15), img);
+  const r = clampRect(rel(screen,.28,.285,.40,.17), img);
   const c=document.createElement('canvas'); c.width=Math.round(r.w); c.height=Math.round(r.h);
   const ctx=c.getContext('2d'); ctx.drawImage(img,r.x,r.y,r.w,r.h,0,0,c.width,c.height);
   const im=ctx.getImageData(0,0,c.width,c.height);
 
   // 依實機畫面，三顆 pos 按鈕約佔 ROI 的左/中/右三段；每段只看中間按鈕本體，避開文字與邊框。
   const boxes=[
-    {x0:0.03,x1:0.31,y0:0.12,y1:0.78},
-    {x0:0.35,x1:0.64,y0:0.12,y1:0.78},
-    {x0:0.68,x1:0.97,y0:0.12,y1:0.78}
+    {x0:0.00,x1:0.333,y0:0.10,y1:0.82},
+    {x0:0.333,x1:0.666,y0:0.10,y1:0.82},
+    {x0:0.666,x1:1.00,y0:0.10,y1:0.82}
   ];
   const scores=boxes.map(b=>greenScore(im,c.width,c.height,b));
   const max=Math.max(...scores); const idx=scores.indexOf(max);
@@ -138,8 +142,8 @@ function detectPosSelection(img, screen){
 
   // 精度驗證畫面在這個 ROI 不是 pos 按鈕，會有零散色塊；提高門檻避免誤判。
   // 選取的青綠色按鈕通常分數明顯高於其他兩格。
-  if(max < 0.030) return null;
-  if(max < second * 1.45 && max < 0.085) return null;
+  if(max < 0.020) return null;
+  if(max < second * 1.20 && max < 0.060) return null;
   return idx+1;
 }
 
@@ -151,9 +155,9 @@ function greenScore(im,w,h,b){
       const i=(y*w+x)*4; const R=im.data[i],G=im.data[i+1],B=im.data[i+2];
       total++;
       // CM602 選取色：青綠色，G/B 高、R 低；用連續分數而非硬切，提升不同光線下的穩定度。
-      const cyan = Math.max(0, Math.min(G,B)-R-18) / 180;
-      const bright = Math.max(0, Math.min(G,B)-75) / 180;
-      if(G>90 && B>75 && R<175 && cyan>0) score += Math.min(1, cyan) * Math.min(1, bright);
+      const cyan = Math.max(0, Math.min(G,B)-R-25) / 190;
+      const bright = Math.max(0, Math.min(G,B)-80) / 180;
+      if(G>95 && B>80 && R<150 && cyan>0) score += Math.min(1, cyan) * Math.min(1, bright);
     }
   }
   return total ? score/total : 0;
@@ -165,9 +169,10 @@ async function ocrCanvas(worker, canvas){
 function decideType(text,posSel){
   const t=(text||'').replace(/\s/g,'');
   const low=t.toLowerCase();
-  if(t.includes('精') || t.includes('驗') || low.includes('seq')) return 'precision';
-  if(t.includes('各') || t.includes('角') || t.includes('吸') || low.includes('pos')) return 'position';
   if(posSel) return 'position';
+  if(t.includes('精') || t.includes('驗') || low.includes('seq')) return 'precision';
+  // 沒有 Pos 按鈕時，不再因為 OCR 偶然讀到「吸」就判成位置畫面。
+  if((t.includes('各角度') || low.includes('pos1') || low.includes('pos2') || low.includes('pos3'))) return 'position';
   return 'precision';
 }
 function guessPosFromText(text){
