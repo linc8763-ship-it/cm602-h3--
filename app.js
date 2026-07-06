@@ -101,8 +101,8 @@ function cropCanvas(img, r, scale=3, binary=true){
     const im=ctx.getImageData(0,0,out.width,out.height); const d=im.data;
     for(let i=0;i<d.length;i+=4){
       let g=0.299*d[i]+0.587*d[i+1]+0.114*d[i+2];
-      g = Math.max(0, Math.min(255, (g-118)*2.2+128));
-      const v = g>150 ? 255 : 0; d[i]=d[i+1]=d[i+2]=v;
+      g = Math.max(0, Math.min(255, (g-105)*1.7+128));
+      const v = g>135 ? 255 : 0; d[i]=d[i+1]=d[i+2]=v;
     }
     ctx.putImageData(im,0,0);
   }
@@ -113,26 +113,30 @@ function buildRois(img, screen, typeGuess){
   return {
     title: cropCanvas(img, rel(screen, .13,.07,.54,.095), 3, true),
     posButtons: cropCanvas(img, rel(screen, .33,.30,.32,.15), 4, false),
-    positionTable: cropCanvas(img, rel(screen, .035,.55,.285,.39), 4, true),
-    precisionTable: cropCanvas(img, rel(screen, .06,.19,.64,.45), 3, true)
+    positionTable: cropCanvas(img, rel(screen, .035,.500,.285,.340), 4, true),
+    precisionTable: cropCanvas(img, rel(screen, .06,.18,.64,.43), 3, true)
   };
 }
 
 function detectPosSelection(img, screen){
+  // 第四階段：改用綠色選取按鈕的重心判斷，不用固定三格分數，避免 Pos2 被誤判成 Pos1。
   const r = clampRect(rel(screen,.33,.30,.32,.15), img);
   const c=document.createElement('canvas'); c.width=Math.round(r.w); c.height=Math.round(r.h);
   const ctx=c.getContext('2d'); ctx.drawImage(img,r.x,r.y,r.w,r.h,0,0,c.width,c.height);
-  const centers=[.17,.50,.83]; let scores=[];
-  centers.forEach((cx,idx)=>{
-    const sx=Math.round(c.width*(cx-.10)), ex=Math.round(c.width*(cx+.10));
-    const sy=Math.round(c.height*.20), ey=Math.round(c.height*.80);
-    const im=ctx.getImageData(Math.max(0,sx),Math.max(0,sy),Math.min(c.width,ex)-Math.max(0,sx),Math.min(c.height,ey)-Math.max(0,sy));
-    let count=0,total=0;
-    for(let i=0;i<im.data.length;i+=4){ const R=im.data[i],G=im.data[i+1],B=im.data[i+2]; total++; if(G>120 && B>95 && R<120 && G>R*1.25) count++; }
-    scores[idx]=count/Math.max(1,total);
-  });
-  const max=Math.max(...scores); const idx=scores.indexOf(max);
-  return max>0.06 ? idx+1 : null;
+  const im=ctx.getImageData(0,0,c.width,c.height);
+  let sumX=0, count=0;
+  for(let y=0;y<c.height;y++){
+    for(let x=0;x<c.width;x++){
+      const i=(y*c.width+x)*4; const R=im.data[i],G=im.data[i+1],B=im.data[i+2];
+      // CM602 選取狀態為青綠色：G/B 偏高、R 偏低。放寬條件以適應手機拍照亮度。
+      if(G>100 && B>75 && R<155 && G>R*1.08 && B>R*0.85){ sumX += x; count++; }
+    }
+  }
+  if(count < c.width*c.height*0.008) return null;
+  const cx = sumX / count / c.width;
+  if(cx < 0.36) return 1;
+  if(cx < 0.66) return 2;
+  return 3;
 }
 
 async function ocrCanvas(worker, canvas){
@@ -155,42 +159,52 @@ function normalizeText(text){
 }
 function nums(line){ return (normalizeText(line).match(/-?\d+(?:\.\d+)?/g)||[]).map(Number); }
 
+function decimalTokens(text){
+  const t=normalizeText(text);
+  return (t.match(/-?\d+\.\d{2,3}/g)||[]).map(v=>Number(v));
+}
 function parsePositionRows(text){
   const angleOrder=[0,45,90,135,180,-135,-90,-45];
-  const lines=normalizeText(text).split(/\n+/).map(s=>s.trim()).filter(Boolean);
+  const t=normalizeText(text);
+  const values=decimalTokens(t).filter(v=>Math.abs(v)<1);
   const rows=[];
-  for(const line of lines){
-    let n=nums(line); if(n.length<3) continue;
-    let angle=n[0];
-    const nearest=angleOrder.reduce((a,b)=>Math.abs(b-angle)<Math.abs(a-angle)?b:a, angleOrder[0]);
-    // 只接受接近標準角度的列，避免把右側按鍵或雜訊放進來。
-    if(Math.abs(nearest-angle)>6) continue;
-    const decimals=n.filter(v=>Math.abs(v)<2 && String(v).includes('.') || Math.abs(v)<2);
-    let x,y;
-    if(n.length>=3){ x=n[n.length-2]; y=n[n.length-1]; }
-    if(isFinite(x)&&isFinite(y)&&Math.abs(x)<1&&Math.abs(y)<1) rows.push({angle:nearest,x:round3(x),y:round3(y),source:line});
+  // 固定 CM602 吸頭位置表：每列 X/Y 兩個小數。優先用小數對，不依賴角度 OCR。
+  for(let i=0;i+1<values.length && rows.length<8;i+=2){
+    const x=values[i], y=values[i+1];
+    if(Math.abs(x)<1 && Math.abs(y)<1){ rows.push({angle:angleOrder[rows.length],x:round3(x),y:round3(y),source:`pair ${rows.length+1}`}); }
   }
-  // 依標準角度補齊排序，去重。
-  const uniq=[]; const seen=new Set();
-  for(const a of angleOrder){ const r=rows.find(v=>v.angle===a && !seen.has(a)); if(r){uniq.push(r);seen.add(a);} }
-  return {rows:uniq, values:uniq};
+  // 若 OCR 把前幾列切掉，只顯示部分資料，也仍回傳已抓到的值，讓現場可手動補。
+  return {rows, values:rows};
 }
 
 function parsePrecisionRows(text){
   const lines=normalizeText(text).split(/\n+/).map(s=>s.trim()).filter(Boolean);
   const rows=[];
   for(const line of lines){
-    const n=nums(line); if(n.length<6) continue;
-    // 精度驗證每列最後三個數字通常是 偏移量 X / Y / A，取最後三個的前兩個。
-    const tail=n.slice(-3); const x=tail[0], y=tail[1];
-    let seq = n[0], nozzle = n[1];
+    const n=nums(line); if(n.length<5) continue;
+    // 偏移量 X/Y 通常是每列最後三個數值中的前兩個：X, Y, A。
+    const small=n.filter(v=>Math.abs(v)<1 || Math.abs(v)===0);
+    if(small.length<2) continue;
+    const x=small[small.length-3] ?? small[small.length-2];
+    const y=small[small.length-2] ?? small[small.length-1];
+    const seqGuess=n.find(v=>v>=1 && v<=12) ?? rows.length+1;
+    const nozzleGuess=[...n].find(v=>v>=1 && v<=3) ?? ((rows.length%3)+1);
     if(isFinite(x)&&isFinite(y)&&Math.abs(x)<1&&Math.abs(y)<1){
-      rows.push({seq:Math.round(seq), nozzle:Math.round(nozzle), x:round3(x), y:round3(y), source:line});
+      rows.push({seq:Math.round(seqGuess), nozzle:Math.round(nozzleGuess), x:round3(x), y:round3(y), source:line});
     }
   }
-  // 只留前 12 列，並去掉明顯不是 1~12 的列。
-  const clean=rows.filter(r=>r.seq>=1 && r.seq<=12).slice(0,12);
-  return {rows:clean, values:clean};
+  // 若逐列 OCR 不穩，改用全表小數序列重建 12 列：每列最後 3 個偏移數值 X/Y/A。
+  if(rows.length<8){
+    const all=decimalTokens(text);
+    const offsetCandidates=all.filter(v=>Math.abs(v)<1);
+    const rebuilt=[];
+    for(let i=0; i+2<offsetCandidates.length && rebuilt.length<12; i+=3){
+      const x=offsetCandidates[i], y=offsetCandidates[i+1];
+      if(Math.abs(x)<1 && Math.abs(y)<1){ rebuilt.push({seq:rebuilt.length+1, nozzle:(rebuilt.length%3)+1, x:round3(x), y:round3(y), source:`rebuilt ${rebuilt.length+1}`}); }
+    }
+    if(rebuilt.length>rows.length) return {rows:rebuilt, values:rebuilt};
+  }
+  return {rows:rows.slice(0,12), values:rows.slice(0,12)};
 }
 function round3(v){ return Math.round(v*1000)/1000; }
 
